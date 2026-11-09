@@ -13,13 +13,15 @@ Client side only.
 - 67 countries have a drawn flag, the ones servers are most often hosted in; any other country shows its
   two-letter code, like **MT**.
 - Hovering a flag shows the country, like "Germany (DE)".
+- A grey **?** marks a server whose location can't be shown; hover it for why.
 - Servers on your own network (LAN, 192.168.x.x, 127.0.0.1 and the like) are never looked up.
 
 ## Privacy: what is sent where
 
 To know where a server is, the mod resolves the server's address to an IP address and sends **only that IP** to
 [api.country.is](https://country.is) (open source, no account or key), which answers with a country code. It does so
-once per server per game session, in the background, and only while **Look up server locations** is on. Nothing
+once per server per game session (a lookup that couldn't get through is tried again a minute later, three times at
+most), in the background, and only while **Look up server locations** is on. Nothing
 about you, your account or your other servers is sent. Turn the setting off and the mod sends nothing.
 
 ## Settings
@@ -32,7 +34,25 @@ Options > Mods > Server Flags > Settings. Each button steps through its values.
 | Flag position | After the name, On the icon | After the name |
 | Country name on hover | OFF, ON | ON |
 | Code when no flag | OFF, ON | ON |
+| ? when the location is unknown | OFF, ON | ON |
 | Reset to defaults | | |
+
+## No flags?
+
+A grey **?** (hover it) and a line in the game log say why:
+
+- **"Location lookup blocked"**: something stops the game from reaching `api.country.is`, most often an ad
+  blocker's DNS list (AdGuard Home's default *AdGuard DNS filter* blocks it, Pi-hole lists often do), or a firewall.
+  Allow the domain and the flags appear within a minute, no restart needed:
+  - AdGuard Home: Query Log, the blocked `api.country.is` line, ⋮, **Unblock** (or add `@@||api.country.is^` to
+    Filters > Custom filtering rules).
+  - AdGuard apps: add `api.country.is` to the Allowlist / User rules.
+  - Pi-hole: Domains, add `api.country.is` as an exact allow.
+- **"Behind DDoS protection"**: the server's address belongs to a network like Cloudflare that answers from many
+  countries at once (anycast), so it has no single country. Hypixel is one. Nothing to fix.
+- **"The address doesn't resolve"**: the server address in your list is wrong or your DNS can't find it.
+
+A blocked or unresolved lookup is tried again a minute later, three times at most.
 
 ## Good to know
 

@@ -1,6 +1,6 @@
 [mod]
 id = "server_flags"
-version = "1.0.0"
+version = "1.0.1"
 priority = 100
 
 # The Horizon commit it was written and checked against (Nightly 2026-11-08).

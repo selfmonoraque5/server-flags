@@ -8,8 +8,10 @@
 //
 // Where a server is: its address is resolved to an IP here, and the IP sent to
 // https://api.country.is (open source, no key, nothing else sent), once per
-// server per session, only while the setting is on. Local network addresses
-// are never sent.
+// server per session (a lookup that couldn't get through is retried a minute
+// later, three times at most), only while the setting is on. Local network
+// addresses are never sent. A server with no country to show gets a "?" and a
+// line in the game log saying why.
 use std::collections::HashMap;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -18,7 +20,7 @@ use std::sync::{Mutex, OnceLock};
 /// The mod's id (its settings folder), name and version.
 pub const ID: &str = "server_flags";
 pub const NAME: &str = "Server Flags";
-pub const VERSION: &str = "1.0.0";
+pub const VERSION: &str = "1.0.1";
 pub const DESCRIPTION: &str = "A flag beside each server in the Multiplayer list for the country it is hosted in. Looks servers up at api.country.is.";
 
 /// The service a server's IP is sent to.
@@ -41,11 +43,12 @@ pub struct Opt {
 const ON_OFF: &[(u8, &str)] = &[(0, "OFF"), (1, "ON")];
 const PLACE: &[(u8, &str)] = &[(0, "After the name"), (1, "On the icon")];
 
-pub const OPTS: [Opt; 4] = [
+pub const OPTS: [Opt; 5] = [
     Opt { key: "lookup", label: "Look up server locations", choices: ON_OFF, default: 1 },
     Opt { key: "place", label: "Flag position", choices: PLACE, default: 0 },
     Opt { key: "tooltip", label: "Country name on hover", choices: ON_OFF, default: 1 },
     Opt { key: "codes", label: "Code when no flag", choices: ON_OFF, default: 1 },
+    Opt { key: "unknown", label: "? when the location is unknown", choices: ON_OFF, default: 1 },
 ];
 
 pub mod o {
@@ -53,6 +56,7 @@ pub mod o {
     pub const PLACE: usize = 1;
     pub const TOOLTIP: usize = 2;
     pub const CODES: usize = 3;
+    pub const UNKNOWN: usize = 4;
 }
 
 pub const RESET_LABEL: &str = "Reset to defaults";
@@ -218,38 +222,109 @@ pub enum Place {
     /// On the local network: nothing was sent.
     Local,
     Country(String),
-    /// The address didn't resolve, or the service didn't answer.
-    Unknown,
+    /// The service knows no single country for the IP: anycast, as DDoS
+    /// protection (Cloudflare, TCPShield) gives big servers. Final.
+    NoCountry,
+    /// The service couldn't be reached: an ad blocker or DNS filter blocking
+    /// it (AdGuard, Pi-hole), a firewall, or no internet. Retried.
+    Blocked,
+    /// The server's own address didn't resolve. Retried.
+    Unresolved,
 }
 
-fn places() -> &'static Mutex<HashMap<String, Place>> {
-    static PLACES: OnceLock<Mutex<HashMap<String, Place>>> = OnceLock::new();
+impl Place {
+    /// Whether looking again may change the answer.
+    pub fn retried(&self) -> bool {
+        matches!(self, Place::Blocked | Place::Unresolved)
+    }
+}
+
+/// How many times a failed lookup is retried, and how long apart.
+pub const RETRIES: u8 = 3;
+pub const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What the service answered: an HTTP status and body, or no answer at all.
+pub enum Answer {
+    Status(u16, String),
+    Unreachable,
+}
+
+/// A server's place from the service's answer.
+pub fn place_of(answer: Answer) -> Place {
+    match answer {
+        Answer::Status(200, body) => parse_answer(&body).map_or(Place::NoCountry, Place::Country),
+        // country.is answers 404 for an IP it has no country for.
+        Answer::Status(404, _) => Place::NoCountry,
+        // Rate limited or the service is down: try again later.
+        Answer::Status(_, _) | Answer::Unreachable => Place::Blocked,
+    }
+}
+
+/// The game log's line for a lookup that found no country, once per server.
+pub fn log_line(address: &str, place: &Place) -> Option<String> {
+    let why = match place {
+        Place::NoCountry => "has no single country (anycast or DDoS protection): no flag".to_owned(),
+        Place::Blocked => "can't reach api.country.is: allow api.country.is in your ad blocker (AdGuard, Pi-hole...) or firewall, or check your connection; retrying in a minute".to_owned(),
+        Place::Unresolved => "doesn't resolve (wrong address or a DNS problem); retrying in a minute".to_owned(),
+        _ => return None,
+    };
+    Some(format!("{NAME}: {address} {why}"))
+}
+
+struct Entry {
+    place: Place,
+    /// Lookups made so far, and when the next may be made.
+    tries: u8,
+    next: std::time::Instant,
+    logged: bool,
+}
+
+fn places() -> &'static Mutex<HashMap<String, Entry>> {
+    static PLACES: OnceLock<Mutex<HashMap<String, Entry>>> = OnceLock::new();
     PLACES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Where server `address` is, starting its lookup the first time it is asked
-/// (in the background) while lookups are on.
+/// (in the background) while lookups are on, and again a minute after a
+/// lookup that may succeed later (at most `RETRIES` times).
 pub fn place(address: &str) -> Option<Place> {
     let mut known = places().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(p) = known.get(address) {
-        return Some(p.clone());
+    let now = std::time::Instant::now();
+    if let Some(e) = known.get(address)
+        && !(e.place.retried() && e.tries <= RETRIES && now >= e.next)
+    {
+        return Some(e.place.clone());
     }
     if !current().on(o::LOOKUP) {
-        return None;
+        return known.get(address).map(|e| e.place.clone());
     }
-    known.insert(address.to_owned(), Place::Pending);
+    let tries = known.get(address).map_or(0, |e| e.tries) + 1;
+    let logged = known.get(address).is_some_and(|e| e.logged);
+    known.insert(
+        address.to_owned(),
+        Entry { place: Place::Pending, tries, next: now + RETRY_AFTER, logged },
+    );
     let key = address.to_owned();
     let spawned = std::thread::Builder::new()
         .name("server-flags".into())
         .spawn(move || {
             let found = look_up(&key);
-            places()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(key, found);
+            let mut known = places().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(e) = known.get_mut(&key) {
+                if !e.logged
+                    && let Some(line) = log_line(&key, &found)
+                {
+                    eprintln!("{line}");
+                    e.logged = true;
+                }
+                e.place = found;
+                e.next = std::time::Instant::now() + RETRY_AFTER;
+            }
         });
-    if spawned.is_err() {
-        known.insert(address.to_owned(), Place::Unknown);
+    if spawned.is_err()
+        && let Some(e) = known.get_mut(address)
+    {
+        e.place = Place::Blocked;
     }
     Some(Place::Pending)
 }
@@ -257,26 +332,26 @@ pub fn place(address: &str) -> Option<Place> {
 /// Resolves the address and asks the service where its IP is.
 fn look_up(address: &str) -> Place {
     let Some((host, port)) = host_port(address) else {
-        return Place::Unknown;
+        return Place::Unresolved;
     };
     let Ok(mut addrs) = (host.as_str(), port).to_socket_addrs() else {
-        return Place::Unknown;
+        return Place::Unresolved;
     };
     let Some(ip) = addrs.next().map(|a| a.ip()) else {
-        return Place::Unknown;
+        return Place::Unresolved;
     };
     if is_local(ip) {
         return Place::Local;
     }
-    let answer = ureq::get(&format!("{SERVICE}{ip}"))
+    let answer = match ureq::get(&format!("{SERVICE}{ip}"))
         .timeout(std::time::Duration::from_secs(6))
         .call()
-        .ok()
-        .and_then(|r| r.into_string().ok());
-    match answer.as_deref().and_then(parse_answer) {
-        Some(code) => Place::Country(code),
-        None => Place::Unknown,
-    }
+    {
+        Ok(r) => Answer::Status(r.status(), r.into_string().unwrap_or_default()),
+        Err(ureq::Error::Status(code, r)) => Answer::Status(code, r.into_string().unwrap_or_default()),
+        Err(ureq::Error::Transport(_)) => Answer::Unreachable,
+    };
+    place_of(answer)
 }
 
 // ------------------------------------------------------------------- flags
@@ -586,8 +661,16 @@ pub fn tooltip(place: &Place) -> Option<String> {
             None => code.clone(),
         }),
         Place::Local => Some("Local network".into()),
-        _ => None,
+        Place::NoCountry => Some("Location unknown: behind DDoS protection (anycast)".into()),
+        Place::Blocked => Some("Location lookup blocked: allow api.country.is in your ad blocker".into()),
+        Place::Unresolved => Some("Location unknown: the address doesn't resolve".into()),
+        Place::Pending => None,
     }
+}
+
+/// Whether a place shows the "?" marker.
+pub fn unknown(place: &Place) -> bool {
+    matches!(place, Place::NoCountry | Place::Blocked | Place::Unresolved)
 }
 
 #[cfg(test)]
@@ -649,6 +732,36 @@ mod tests {
         assert_eq!(tooltip(&Place::Country("ZZ".into())), Some("ZZ".into()));
         assert_eq!(tooltip(&Place::Local), Some("Local network".into()));
         assert_eq!(tooltip(&Place::Pending), None);
+        for p in [Place::NoCountry, Place::Blocked, Place::Unresolved] {
+            assert!(tooltip(&p).is_some() && unknown(&p), "{p:?}");
+        }
+        assert!(!unknown(&Place::Local) && !unknown(&Place::Pending));
+    }
+
+    #[test]
+    fn answers_become_places() {
+        let ok = |b: &str| Answer::Status(200, b.into());
+        assert_eq!(place_of(ok(r#"{"ip":"8.8.8.8","country":"US"}"#)), Place::Country("US".into()));
+        // Anycast: country.is has no country and says 404.
+        assert_eq!(place_of(Answer::Status(404, String::new())), Place::NoCountry);
+        assert_eq!(place_of(ok("{}")), Place::NoCountry);
+        // Blocked (AdGuard answers 0.0.0.0: the connection is refused), down or rate limited: retried.
+        assert_eq!(place_of(Answer::Unreachable), Place::Blocked);
+        assert_eq!(place_of(Answer::Status(429, String::new())), Place::Blocked);
+        assert_eq!(place_of(Answer::Status(503, String::new())), Place::Blocked);
+        assert!(Place::Blocked.retried() && Place::Unresolved.retried());
+        assert!(!Place::NoCountry.retried() && !Place::Country("DE".into()).retried());
+    }
+
+    #[test]
+    fn failures_get_a_log_line() {
+        let blocked = log_line("play.example.net", &Place::Blocked).unwrap();
+        assert!(blocked.starts_with("Server Flags: play.example.net can't reach api.country.is"));
+        assert!(blocked.contains("AdGuard"));
+        assert!(log_line("mc.hypixel.net", &Place::NoCountry).unwrap().contains("anycast"));
+        assert!(log_line("x", &Place::Unresolved).unwrap().contains("doesn't resolve"));
+        assert_eq!(log_line("x", &Place::Country("US".into())), None);
+        assert_eq!(log_line("x", &Place::Local), None);
     }
 
     #[test]
@@ -663,6 +776,7 @@ mod tests {
     fn settings_cycle_and_reset() {
         let mut s = Settings::read(|k| (k == "lookup").then(|| "0".to_owned()));
         assert!(!s.on(o::LOOKUP));
+        assert!(s.on(o::UNKNOWN), "the ? shows by default");
         assert_eq!(s.click(o::PLACE), [("place", "1".to_owned())]);
         assert_eq!(s.labels()[o::PLACE], "Flag position: On the icon");
         assert_eq!(s.click(OPTS.len()).len(), OPTS.len());

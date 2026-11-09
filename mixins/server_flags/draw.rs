@@ -1,7 +1,8 @@
 // `Screen::draw_tooltip`, before its own tooltips: on the server list, each
-// saved server's flag where its row is (as `draw` lays the rows out), and the
-// country's name when the pointer is over a flag. Rows scrolled out of the
-// list are left out.
+// saved server's flag where its row is (as `draw` lays the rows out), a grey
+// "?" for a server whose location can't be shown, and the reason or the
+// country's name when the pointer is over it. Rows scrolled out of the list
+// are left out.
 fn server_flags_draw(screen: &Screen, atlas: &HudAtlas, batch: &mut HudBatch, cursor: (f32, f32)) {
     use horizon_client::multiplayer::server_flags as m;
     let Screen::List {
@@ -30,36 +31,39 @@ fn server_flags_draw(screen: &Screen, atlas: &HudAtlas, batch: &mut HudBatch, cu
         let Some(place) = m::place(&server.ip) else {
             continue;
         };
-        let m::Place::Country(code) = &place else {
-            continue;
-        };
         let name_w = HudBatch::text_width(atlas, &server.name);
         let [fx, fy] = m::flag_at(settings.get(m::o::PLACE), cx, cy, name_w, room);
         if fy - 1.0 < top || fy + m::FLAG_H + 1.0 > bottom {
             continue;
         }
-        let width = match m::flag(code) {
-            Some(cells) => {
-                batch.fill(atlas, fx - 1.0, fy - 1.0, m::FLAG_W + 2.0, m::FLAG_H + 2.0, rgba(0, 0, 0, 160));
-                for (x, y, w, h, [r, g, b]) in cells {
-                    batch.fill(
-                        atlas,
-                        fx + f32::from(x),
-                        fy + f32::from(y),
-                        f32::from(w),
-                        f32::from(h),
-                        rgba(r, g, b, 255),
-                    );
+        // A badge: a dark box with `text` in it.
+        let mut badge = |text: &str, color: u32| {
+            let tw = HudBatch::text_width(atlas, text);
+            batch.fill(atlas, fx - 1.0, fy - 1.0, tw + 3.0, m::FLAG_H + 2.0, rgba(0, 0, 0, 170));
+            batch.text(atlas, text, fx + 0.5, fy, color, false);
+            tw + 1.0
+        };
+        let width = match &place {
+            m::Place::Country(code) => match m::flag(code) {
+                Some(cells) => {
+                    batch.fill(atlas, fx - 1.0, fy - 1.0, m::FLAG_W + 2.0, m::FLAG_H + 2.0, rgba(0, 0, 0, 160));
+                    for (x, y, w, h, [r, g, b]) in cells {
+                        batch.fill(
+                            atlas,
+                            fx + f32::from(x),
+                            fy + f32::from(y),
+                            f32::from(w),
+                            f32::from(h),
+                            rgba(r, g, b, 255),
+                        );
+                    }
+                    m::FLAG_W
                 }
-                m::FLAG_W
-            }
-            None if settings.on(m::o::CODES) => {
-                let tw = HudBatch::text_width(atlas, code);
-                batch.fill(atlas, fx - 1.0, fy - 1.0, tw + 3.0, m::FLAG_H + 2.0, rgba(0, 0, 0, 170));
-                batch.text(atlas, code, fx + 0.5, fy, u32::MAX, false);
-                tw + 1.0
-            }
-            None => continue,
+                None if settings.on(m::o::CODES) => badge(code, u32::MAX),
+                None => continue,
+            },
+            p if m::unknown(p) && settings.on(m::o::UNKNOWN) => badge("?", rgba(170, 170, 170, 255)),
+            _ => continue,
         };
         let (px, py) = cursor;
         if px >= fx - 1.0 && px < fx + width + 1.0 && py >= fy - 1.0 && py < fy + m::FLAG_H + 1.0 {
