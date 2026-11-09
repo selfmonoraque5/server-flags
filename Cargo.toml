@@ -1,0 +1,16 @@
+[package]
+name = "horizon-mod-server-flags"
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Server Flags for Horizon, a native mod: the country each server in the Multiplayer list is hosted in."
+
+# The mod's logic and its tests: the same file the bundle adds to the game.
+[lib]
+path = "mixins/server_flags/runtime.rs"
+
+# The same versions and features Horizon's own client uses.
+[dependencies]
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["tls"] }

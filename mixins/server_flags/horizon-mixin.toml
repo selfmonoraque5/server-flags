@@ -1,0 +1,71 @@
+[mod]
+id = "server_flags"
+version = "1.0.0"
+priority = 100
+
+# The Horizon commit it was written and checked against (Nightly 2026-11-08).
+# Besides hook points it hooks the server list's own tooltip pass
+# (multiplayer.rs, `Screen::draw_tooltip`), which a later Horizon may change.
+[compatibility]
+horizon_revision = "fdc87aecdbd116bf1e08adcd062fcbaea8c2e2ca"
+
+# In `multiplayer`, beside the server list: `horizon_client::multiplayer::server_flags`.
+[[module]]
+id = "runtime"
+file = "crates/horizon-client/src/multiplayer.rs"
+name = "server_flags"
+source = "runtime.rs"
+visibility = "pub"
+
+# The flags, drawn over the server list before its tooltips.
+[[injection]]
+id = "draw"
+kind = "HEAD"
+target = "horizon_client::multiplayer::Screen::draw_tooltip"
+helper = "draw.rs"
+bindings = [
+  { name = "screen", ty = "&Screen", value = "self" },
+  { name = "atlas", ty = "&HudAtlas", value = "atlas" },
+  { name = "batch", ty = "&mut HudBatch", value = "&mut *batch" },
+  { name = "cursor", ty = "(f32, f32)", value = "cursor" },
+]
+
+[[injection]]
+id = "frame"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_frame"
+helper = "frame.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+]
+
+[[injection]]
+id = "list"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_mods"
+helper = "list.rs"
+bindings = [
+  { name = "mods", ty = "&mut Vec<crate::game::native_hooks::NativeMod>", value = "&mut *mods" },
+]
+
+[[injection]]
+id = "settings"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_settings"
+helper = "settings.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "mod_id", ty = "&str", value = "mod_id" },
+  { name = "buttons", ty = "&mut Vec<String>", value = "&mut *buttons" },
+]
+
+[[injection]]
+id = "click"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_settings_click"
+helper = "click.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "mod_id", ty = "&str", value = "mod_id" },
+  { name = "button", ty = "usize", value = "button" },
+]
