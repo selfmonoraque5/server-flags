@@ -1,0 +1,17 @@
+{
+  "server_flags.option.lookup": "Look up server locations",
+  "server_flags.option.lookup.0": "OFF",
+  "server_flags.option.lookup.1": "ON",
+  "server_flags.option.place": "Flag position",
+  "server_flags.option.place.0": "After the name",
+  "server_flags.option.place.1": "On the icon",
+  "server_flags.option.tooltip": "Country name on hover",
+  "server_flags.option.tooltip.0": "OFF",
+  "server_flags.option.tooltip.1": "ON",
+  "server_flags.option.codes": "Code when no flag",
+  "server_flags.option.codes.0": "OFF",
+  "server_flags.option.codes.1": "ON",
+  "server_flags.option.unknown": "? when the location is unknown",
+  "server_flags.option.unknown.0": "OFF",
+  "server_flags.option.unknown.1": "ON"
+}

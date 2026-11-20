@@ -1,0 +1,30 @@
+id = "server_flags"
+name = "Server Flags"
+version = "2.0.0"
+description = "A flag beside each server in the Multiplayer list for the country it's hosted in. Looks servers up at api.country.is."
+authors = ["selfmonoraque5"]
+license = "MIT"
+license_url = "https://github.com/selfmonoraque5/server-flags/blob/main/LICENSE"
+credits = "Inspired by Khajiitos' Server Country Flags; flags from api.country.is."
+homepage = "https://github.com/selfmonoraque5/server-flags"
+issues = "https://github.com/selfmonoraque5/server-flags/issues"
+api = "0.2"
+side = "client"
+capabilities = ["registries"]
+
+[native]
+game = "26.3"
+horizon = "f00125f61f794aaa3d4e950d301f353b35b6ee3d"
+mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
+
+# The mod API doesn't show a mod the server list, so the mod patches the
+# game's own `draw_title_screen_with_post_hook`, which a later Horizon may change.
+[[native.mixin]]
+id = "draw"
+kind = "HEAD"
+target = "horizon_client::game::screen_backgrounds::Game<'_>::draw_title_screen_with_post_hook"
+helper = "src/mixins/draw.rs"
+bindings = [
+  { name = "game", ty = "&Game<'_>", value = "self" },
+  { name = "batch", ty = "&mut HudBatch", value = "&mut *batch" },
+]

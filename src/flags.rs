@@ -3,25 +3,27 @@
 // name when you hover it. Inspired by Khajiitos' Server Country Flags,
 // written from scratch for Horizon (none of its code or images: the flags are
 // drawn here as 12 x 8 pixel art, and a country without one shows its code).
-// This file is both the mod's Cargo library (its tests) and the module the
-// bundle adds to the game.
+// This module is the mod's logic and its tests; the hooks are in lib.rs and
+// the game patch that draws the flags in mixins/draw.rs (which reaches this
+// crate as `mod_server_flags`).
 //
 // Where a server is: its address is resolved to an IP here, and the IP sent to
 // https://api.country.is (open source, no key, nothing else sent), once per
 // server per session (a lookup that couldn't get through is retried a minute
 // later, three times at most), only while the setting is on. Local network
-// addresses are never sent. A server with no country to show gets a "?" and a
+// addresses are never sent. The request is made by the system's `curl`
+// (built into Windows 10 and 11, macOS and most Linux systems): Rust's HTTPS
+// libraries bring their own copy of `ring`, which a mod may not link beside
+// the game's. A server with no country to show gets a "?" and a
 // line in the game log saying why.
 use std::collections::HashMap;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-/// The mod's id (its settings folder), name and version.
+/// The mod's id (its settings folder) and name; the version is in horizon-mod.toml.
 pub const ID: &str = "server_flags";
 pub const NAME: &str = "Server Flags";
-pub const VERSION: &str = "1.0.1";
-pub const DESCRIPTION: &str = "A flag beside each server in the Multiplayer list for the country it is hosted in. Looks servers up at api.country.is.";
 
 /// The service a server's IP is sent to.
 pub const SERVICE: &str = "https://api.country.is/";
@@ -33,6 +35,8 @@ pub const GAP: f32 = 4.0;
 
 // ---------------------------------------------------------------- settings
 
+/// One option of the settings page: its file, its English label, the values
+/// the player cycles through (with their names) and the default.
 pub struct Opt {
     pub key: &'static str,
     pub label: &'static str,
@@ -58,8 +62,6 @@ pub mod o {
     pub const CODES: usize = 3;
     pub const UNKNOWN: usize = 4;
 }
-
-pub const RESET_LABEL: &str = "Reset to defaults";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
@@ -94,44 +96,46 @@ impl Settings {
         self.values[i] != 0
     }
 
-    pub fn labels(&self) -> Vec<String> {
-        let mut labels: Vec<String> = OPTS
-            .iter()
-            .zip(self.values)
-            .map(|(opt, v)| {
-                let name = opt.choices.iter().find(|c| c.0 == v).map_or("?", |c| c.1);
-                format!("{}: {name}", opt.label)
-            })
-            .collect();
-        labels.push(RESET_LABEL.into());
-        labels
+    /// From the settings page, where each option is a choice: `index` gives
+    /// the option the player picked for a key (its position in `choices`).
+    pub fn from_choices(index: impl Fn(&str) -> Option<u32>) -> Self {
+        Self::read(|key| {
+            let opt = OPTS.iter().find(|opt| opt.key == key)?;
+            let at = usize::try_from(index(key)?).ok()?;
+            opt.choices.get(at).map(|c| c.0.to_string())
+        })
     }
 
-    pub fn click(&mut self, i: usize) -> Vec<(&'static str, String)> {
-        if i == OPTS.len() {
-            *self = Self::default();
-            return OPTS.iter().zip(self.values).map(|(opt, v)| (opt.key, v.to_string())).collect();
-        }
-        let Some(opt) = OPTS.get(i) else {
-            return Vec::new();
-        };
-        let at = opt.choices.iter().position(|c| c.0 == self.values[i]).unwrap_or(0);
-        self.values[i] = opt.choices[(at + 1) % opt.choices.len()].0;
-        vec![(opt.key, self.values[i].to_string())]
+    /// Option `i`'s value as the page keeps it: its position in `choices`.
+    pub fn choice_index(&self, i: usize) -> usize {
+        OPTS[i].choices.iter().position(|c| c.0 == self.values[i]).unwrap_or(0)
     }
+}
+
+/// The translation key of option `key`'s label, and of its choice `value`.
+pub fn label_key(key: &str) -> String {
+    format!("{ID}.option.{key}")
+}
+
+pub fn choice_key(key: &str, value: u8) -> String {
+    format!("{ID}.option.{key}.{value}")
+}
+
+/// `assets/server_flags/lang/en_us.json`: every label the page shows, in English.
+#[cfg(test)]
+pub fn english() -> Vec<(String, String)> {
+    let mut lines = Vec::new();
+    for opt in &OPTS {
+        lines.push((label_key(opt.key), opt.label.to_owned()));
+        for (value, name) in opt.choices {
+            lines.push((choice_key(opt.key, *value), (*name).to_owned()));
+        }
+    }
+    lines
 }
 
 static LOADED: AtomicBool = AtomicBool::new(false);
 static VALUES: [AtomicU8; OPTS.len()] = [const { AtomicU8::new(0) }; OPTS.len()];
-/// Whether the mod is on in Options > Mods (the title screen can't ask the game).
-static ON: AtomicBool = AtomicBool::new(true);
-
-pub fn settings(get: impl Fn(&str) -> Option<String>) -> Settings {
-    if !LOADED.load(Ordering::Acquire) {
-        set_settings(Settings::read(get));
-    }
-    current()
-}
 
 pub fn set_settings(settings: Settings) {
     for (slot, v) in VALUES.iter().zip(settings.values) {
@@ -151,12 +155,27 @@ pub fn current() -> Settings {
     s
 }
 
-pub fn set_on(on: bool) {
-    ON.store(on, Ordering::Relaxed);
+/// The server list as Horizon lays it out (`multiplayer.rs`,
+/// `ServerSelectionList`): its header and footer, and rows 305 wide and 36 high.
+const HEADER: f32 = 33.0;
+const FOOTER: f32 = 60.0;
+pub const ROW_WIDTH: f32 = 305.0;
+pub const ROW_HEIGHT: f32 = 36.0;
+
+/// The list's top and bottom and its rows' left edge (`getRowLeft`), on a
+/// screen `w` by `h` GUI pixels.
+pub fn list_area(w: f32, h: f32) -> (f32, f32, f32) {
+    (HEADER, h - FOOTER, (w / 2.0).floor() - (ROW_WIDTH / 2.0).floor())
 }
 
-pub fn on() -> bool {
-    ON.load(Ordering::Relaxed)
+/// The list's content height (`contentHeight`): the rows and 4 pixels of padding.
+pub fn content_height(servers: usize, lan: usize) -> f32 {
+    (servers + 1 + lan) as f32 * ROW_HEIGHT + 4.0
+}
+
+/// A colour as the HUD takes it.
+pub fn rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
+    u32::from_le_bytes([r, g, b, a])
 }
 
 // --------------------------------------------------------------- addresses
@@ -206,11 +225,42 @@ pub fn is_local(ip: IpAddr) -> bool {
     }
 }
 
-/// The two-letter code country.is answers with (`{"ip":"…","country":"DE"}`).
+/// The two-letter code country.is answers with (`{"ip":"…","country":"DE"}`):
+/// the string after the `"country"` key, read without a JSON library.
 pub fn parse_answer(body: &str) -> Option<String> {
-    let json: serde_json::Value = serde_json::from_str(body).ok()?;
-    let code = json.get("country")?.as_str()?.trim().to_ascii_uppercase();
+    let rest = &body[body.find("\"country\"")? + "\"country\"".len()..];
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+    let code = rest[..rest.find('"')?].trim().to_ascii_uppercase();
     (code.len() == 2 && code.chars().all(|c| c.is_ascii_uppercase())).then_some(code)
+}
+
+/// curl's output for `-w "\n%{http_code}"`: the body, then the status on the
+/// last line. curl prints 000 when nothing answered.
+pub fn curl_answer(output: &str) -> Answer {
+    let (body, code) = output.rsplit_once('\n').unwrap_or(("", output));
+    match code.trim().parse::<u16>() {
+        Ok(code) if code != 0 => Answer::Status(code, body.to_owned()),
+        _ => Answer::Unreachable,
+    }
+}
+
+/// Asks the service about `ip` with the system's curl. No curl, a timeout or
+/// no connection are all `Unreachable`.
+fn ask(ip: IpAddr) -> Answer {
+    let mut curl = std::process::Command::new("curl");
+    // The IP's own text: digits, dots and colons, never a shell.
+    curl.args(["-s", "-m", "6", "-w", "\n%{http_code}"]).arg(format!("{SERVICE}{ip}"));
+    curl.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        // CREATE_NO_WINDOW: no console window flashes up beside the game.
+        use std::os::windows::process::CommandExt;
+        curl.creation_flags(0x0800_0000);
+    }
+    match curl.output() {
+        Ok(out) => curl_answer(&String::from_utf8_lossy(&out.stdout)),
+        Err(_) => Answer::Unreachable,
+    }
 }
 
 // ----------------------------------------------------------------- lookups
@@ -343,15 +393,7 @@ fn look_up(address: &str) -> Place {
     if is_local(ip) {
         return Place::Local;
     }
-    let answer = match ureq::get(&format!("{SERVICE}{ip}"))
-        .timeout(std::time::Duration::from_secs(6))
-        .call()
-    {
-        Ok(r) => Answer::Status(r.status(), r.into_string().unwrap_or_default()),
-        Err(ureq::Error::Status(code, r)) => Answer::Status(code, r.into_string().unwrap_or_default()),
-        Err(ureq::Error::Transport(_)) => Answer::Unreachable,
-    };
-    place_of(answer)
+    place_of(ask(ip))
 }
 
 // ------------------------------------------------------------------- flags
@@ -706,6 +748,19 @@ mod tests {
         assert_eq!(parse_answer(r#"{"error":"not found"}"#), None);
         assert_eq!(parse_answer(r#"{"country":"USA"}"#), None);
         assert_eq!(parse_answer("not json"), None);
+        assert_eq!(parse_answer(r#"{ "country" : "de" }"#), Some("DE".into()));
+        assert_eq!(parse_answer(r#"{"country":}"#), None);
+    }
+
+    #[test]
+    fn curl_output_gives_the_status_and_body() {
+        let ok = curl_answer("{\"ip\":\"1.1.1.1\",\"country\":\"AU\"}\n200");
+        assert_eq!(place_of(ok), Place::Country("AU".into()));
+        assert_eq!(place_of(curl_answer("{\"error\":\"x\"}\n404")), Place::NoCountry);
+        assert_eq!(place_of(curl_answer("\n429")), Place::Blocked);
+        // Nothing answered: curl prints 000, or nothing at all when it didn't run.
+        assert!(matches!(curl_answer("\n000"), Answer::Unreachable));
+        assert!(matches!(curl_answer(""), Answer::Unreachable));
     }
 
     #[test]
@@ -773,13 +828,34 @@ mod tests {
     }
 
     #[test]
-    fn settings_cycle_and_reset() {
-        let mut s = Settings::read(|k| (k == "lookup").then(|| "0".to_owned()));
+    fn choices_read_as_their_values() {
+        assert_eq!(Settings::from_choices(|_| None), Settings::default());
+        let s = Settings::from_choices(|key| match key {
+            "place" => Some(1),
+            "lookup" => Some(0),
+            "codes" => Some(7),
+            _ => None,
+        });
+        assert_eq!(s.get(o::PLACE), 1);
         assert!(!s.on(o::LOOKUP));
-        assert!(s.on(o::UNKNOWN), "the ? shows by default");
-        assert_eq!(s.click(o::PLACE), [("place", "1".to_owned())]);
-        assert_eq!(s.labels()[o::PLACE], "Flag position: On the icon");
-        assert_eq!(s.click(OPTS.len()).len(), OPTS.len());
-        assert_eq!(s, Settings::default());
+        assert!(s.on(o::CODES), "not a choice: the default");
+        assert_eq!(s.choice_index(o::PLACE), 1);
+    }
+
+    #[test]
+    fn the_list_is_laid_out_as_horizon_lays_it() {
+        let (top, bottom, left) = list_area(427.0, 240.0);
+        assert_eq!((top, bottom, left), (33.0, 180.0, 61.0));
+        assert_eq!(content_height(2, 1), 4.0 * 36.0 + 4.0);
+    }
+
+    #[test]
+    fn every_label_is_in_english() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/server_flags/lang/en_us.json");
+        let file = std::fs::read_to_string(path).unwrap_or_default();
+        for (key, text) in english() {
+            let line = format!("{key:?}: {text:?}");
+            assert!(file.contains(&line), "{line} missing from en_us.json");
+        }
     }
 }

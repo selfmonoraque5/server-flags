@@ -1,6 +1,6 @@
 <p align="center"><img src="icon.png" width="128" alt="Server Flags icon"></p>
 
-# Server Flags (Horizon native mod)
+# Server Flags (Horizon mod)
 
 A small flag beside each server in your Multiplayer list for the country it is hosted in. Hover the flag for the
 country's name. Pick servers close to you for a better ping at a glance.
@@ -24,9 +24,11 @@ once per server per game session (a lookup that couldn't get through is tried ag
 most), in the background, and only while **Look up server locations** is on. Nothing
 about you, your account or your other servers is sent. Turn the setting off and the mod sends nothing.
 
+The request is made by your system's `curl` program, which Windows 10 and 11, macOS and most Linux systems include.
+
 ## Settings
 
-Options > Mods > Server Flags > Settings. Each button steps through its values.
+Options > Mods > Server Flags > **Config**. Each button steps through its values.
 
 | Setting | Values | Default |
 |---|---|---|
@@ -35,7 +37,6 @@ Options > Mods > Server Flags > Settings. Each button steps through its values.
 | Country name on hover | OFF, ON | ON |
 | Code when no flag | OFF, ON | ON |
 | ? when the location is unknown | OFF, ON | ON |
-| Reset to defaults | | |
 
 ## No flags?
 
@@ -51,6 +52,8 @@ A grey **?** (hover it) and a line in the game log say why:
 - **"Behind DDoS protection"**: the server's address belongs to a network like Cloudflare that answers from many
   countries at once (anycast), so it has no single country. Hypixel is one. Nothing to fix.
 - **"The address doesn't resolve"**: the server address in your list is wrong or your DNS can't find it.
+- **Every server shows "Location lookup blocked"** on a Linux without `curl`: install it (`sudo apt install curl`,
+  or your distribution's package).
 
 A blocked or unresolved lookup is tried again a minute later, three times at most.
 
@@ -62,28 +65,46 @@ A blocked or unresolved lookup is tried again a minute later, three times at mos
 
 ## Install
 
-In the Horizon launcher: Mods, find **Server Flags**, Install, then **Build**. To try a local copy, put the `.hnmod`
-in your instance's `horizon-native-mods/` folder and Build.
+Made for Horizon **Nightly 2026-11-19 · f00125f**.
+It patches the game, so it builds only on that exact Horizon build: if the launcher lists it as
+**Left out**, switch your instance to that Nightly, or wait for the version made for yours.
+
+From GitHub:
+
+1. Download `server_flags-2.0.0.hmod` from the [latest release](https://github.com/selfmonoraque5/server-flags/releases/latest).
+2. Put it in the `horizon-native-mods` folder of your game folder, not in `mods`. On Windows that is
+   `%APPDATA%\horizon\horizon-native-mods`.
+3. In the launcher, open the Mods page and click **Build** (the first build downloads the mod SDK and takes a few
+   minutes). After a build the launcher can look stuck for a while as it cleans its cache: let it finish.
+4. When it says **Up to date**, play.
+
+Once it is listed in the Horizon registry: Mods, find **Server Flags**, Install.
+
+To build a local copy: `horizon-launcher native-build <this folder> --instance <instance> --trust-native-code`.
+
+Server Flags 2.0 is made for Horizon's mod API, so its settings start from the defaults again once: the 1.x
+settings files aren't read.
 
 ## Compatibility
 
-Applied and compile-checked on Horizon Nightly `fdc87ae` (2026-11-08) with horizon-mixins `5a64af9`, also together
-with Living Camera, Map Preview and First Person Body.
+The mod API doesn't show a mod the server list, so besides its hooks (`register`, `setting_changed`,
+`client_tick_post` for the settings) the mod patches one game function (`[[native.mixin]]` in `horizon-mod.toml`):
+a HEAD on `game/interface/screen_backgrounds.rs` `draw_title_screen_with_post_hook`, where it reads the server list
+and draws the flags (`src/mixins/draw.rs`). It works on the Horizon build it is made for; a later Horizon that
+changes that function or the server list's layout needs an update.
 
-Horizon has no hook point for the server list, so besides hook points this mod hooks the list's own tooltip pass
-(`Screen::draw_tooltip` in `crates/horizon-client/src/multiplayer.rs`) and lays the flags out as the list lays out its
-rows. A later Horizon that changes the server list needs an update of this mod.
+## How it works
 
 | File | What it is |
 |---|---|
-| `mixins/server_flags/horizon-mixin.toml` | The bundle: one module and its hooks |
-| `mixins/server_flags/runtime.rs` | Settings, addresses, the lookup, the flags and country names; also this crate's library, for its tests |
-| `draw.rs` | The flags and their tooltip on the server list |
-| `frame.rs` | Whether the mod is on, and its settings |
-| `list.rs`, `settings.rs`, `click.rs` | The Options > Mods page |
+| `horizon-mod.toml` | The manifest: id, version, the Horizon build it is made for, and the game patch |
+| `src/lib.rs` | The hooks: the settings page and its values |
+| `src/flags.rs` | Settings, addresses, the lookup, the flags and country names, with their tests |
+| `src/mixins/draw.rs` | The game patch: the flags on the server list |
+| `assets/server_flags/lang/en_us.json` | The settings page's text |
 
 ```sh
-cargo test    # addresses, local ranges, answers, flags and settings
+cargo test    # addresses, lookups, flags and settings
 ```
 
 ## Credits
