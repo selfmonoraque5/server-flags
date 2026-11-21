@@ -204,9 +204,10 @@ pub fn host_port(address: &str) -> Option<(String, u16)> {
 }
 
 /// An address that never leaves the computer's network: loopback, private,
-/// link-local and the like are not looked up.
+/// link-local and the like are not looked up. An IPv4 address written as IPv6
+/// (`::ffff:192.168.1.2`) counts as the IPv4 address it is.
 pub fn is_local(ip: IpAddr) -> bool {
-    match ip {
+    match ip.to_canonical() {
         IpAddr::V4(v4) => {
             v4.is_loopback()
                 || v4.is_private()
@@ -248,8 +249,10 @@ pub fn curl_answer(output: &str) -> Answer {
 /// no connection are all `Unreachable`.
 fn ask(ip: IpAddr) -> Answer {
     let mut curl = std::process::Command::new("curl");
+    // --disable, which must come first: the user's own curl config (.curlrc) is
+    // not read, so none of its headers go along and it can't make curl write a file.
     // The IP's own text: digits, dots and colons, never a shell.
-    curl.args(["-s", "-m", "6", "-w", "\n%{http_code}"]).arg(format!("{SERVICE}{ip}"));
+    curl.args(["--disable", "-s", "-m", "6", "-w", "\n%{http_code}"]).arg(format!("{SERVICE}{ip}"));
     curl.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     #[cfg(windows)]
     {
@@ -360,6 +363,11 @@ pub fn place(address: &str) -> Option<Place> {
         .spawn(move || {
             let found = look_up(&key);
             let mut known = places().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(found) = found else {
+                // Skipped: looked up afresh if lookups are switched on again.
+                known.remove(&key);
+                return;
+            };
             if let Some(e) = known.get_mut(&key) {
                 if !e.logged
                     && let Some(line) = log_line(&key, &found)
@@ -379,21 +387,26 @@ pub fn place(address: &str) -> Option<Place> {
     Some(Place::Pending)
 }
 
-/// Resolves the address and asks the service where its IP is.
-fn look_up(address: &str) -> Place {
+/// Resolves the address and asks the service where its IP is; `None` when
+/// lookups were switched off while it resolved, and nothing was sent.
+fn look_up(address: &str) -> Option<Place> {
     let Some((host, port)) = host_port(address) else {
-        return Place::Unresolved;
+        return Some(Place::Unresolved);
     };
     let Ok(mut addrs) = (host.as_str(), port).to_socket_addrs() else {
-        return Place::Unresolved;
+        return Some(Place::Unresolved);
     };
-    let Some(ip) = addrs.next().map(|a| a.ip()) else {
-        return Place::Unresolved;
+    let Some(ip) = addrs.next().map(|a| a.ip().to_canonical()) else {
+        return Some(Place::Unresolved);
     };
     if is_local(ip) {
-        return Place::Local;
+        return Some(Place::Local);
     }
-    place_of(ask(ip))
+    // Resolving can take a while: lookups may have been switched off since.
+    if !current().on(o::LOOKUP) {
+        return None;
+    }
+    Some(place_of(ask(ip)))
 }
 
 // ------------------------------------------------------------------- flags
@@ -740,6 +753,10 @@ mod tests {
         assert!(is_local(Ipv6Addr::LOCALHOST.into()));
         assert!(is_local("fd00::1".parse::<Ipv6Addr>().unwrap().into()));
         assert!(!is_local("2a01:4f8::1".parse::<Ipv6Addr>().unwrap().into()));
+        for ip in ["::ffff:10.0.0.5", "::ffff:192.168.1.20", "::ffff:127.0.0.1", "::ffff:100.100.1.1"] {
+            assert!(is_local(ip.parse::<Ipv6Addr>().unwrap().into()), "{ip}");
+        }
+        assert!(!is_local("::ffff:51.75.1.1".parse::<Ipv6Addr>().unwrap().into()));
     }
 
     #[test]

@@ -22,9 +22,13 @@ To know where a server is, the mod resolves the server's address to an IP addres
 [api.country.is](https://country.is) (open source, no account or key), which answers with a country code. It does so
 once per server per game session (a lookup that couldn't get through is tried again a minute later, three times at
 most), in the background, and only while **Look up server locations** is on. Nothing
-about you, your account or your other servers is sent. Turn the setting off and the mod sends nothing.
+about you, your account or your other servers is sent, and addresses on your own network (including IPv4 written
+as IPv6, like `::ffff:192.168.1.2`) are never looked up. Turn the setting off and the mod starts no new lookups; one
+that is already on its way when you switch it off may still finish.
 
 The request is made by your system's `curl` program, which Windows 10 and 11, macOS and most Linux systems include.
+It runs with `--disable`, so your own curl settings (a `.curlrc`) are not used: no extra headers are sent and no file
+is written.
 
 ## Settings
 
@@ -71,7 +75,7 @@ It patches the game, so it builds only on that exact Horizon build: if the launc
 
 From GitHub:
 
-1. Download `server_flags-2.0.1.hmod` from the [latest release](https://github.com/selfmonoraque5/server-flags/releases/latest).
+1. Download `server_flags-2.0.2.hmod` from the [latest release](https://github.com/selfmonoraque5/server-flags/releases/latest).
 2. Put it in the `horizon-native-mods` folder of your game folder, not in `mods`. On Windows that is
    `%APPDATA%\horizon\horizon-native-mods`.
 3. In the launcher, open the Mods page and click **Build** (the first build downloads the mod SDK and takes a few
