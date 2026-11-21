@@ -205,7 +205,8 @@ pub fn host_port(address: &str) -> Option<(String, u16)> {
 
 /// An address that never leaves the computer's network: loopback, private,
 /// link-local and the like are not looked up. An IPv4 address written as IPv6
-/// (`::ffff:192.168.1.2`) counts as the IPv4 address it is.
+/// (`::ffff:192.168.1.2`) or behind NAT64 (`64:ff9b::192.168.1.2`) counts as
+/// the IPv4 address it is.
 pub fn is_local(ip: IpAddr) -> bool {
     match ip.to_canonical() {
         IpAddr::V4(v4) => {
@@ -218,10 +219,18 @@ pub fn is_local(ip: IpAddr) -> bool {
                 || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
         }
         IpAddr::V6(v6) => {
+            let seg = v6.segments();
+            // NAT64 (64:ff9b::/96): the IPv4 address in its last 32 bits.
+            if seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                let [.., a, b, c, d] = v6.octets();
+                return is_local(IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d)));
+            }
             v6.is_loopback()
                 || v6.is_unspecified()
-                || (v6.segments()[0] & 0xFE00) == 0xFC00
-                || (v6.segments()[0] & 0xFFC0) == 0xFE80
+                || (seg[0] & 0xFE00) == 0xFC00
+                || (seg[0] & 0xFFC0) == 0xFE80
+                // 64:ff9b:1::/48, NAT64 for a local network only.
+                || seg[..3] == [0x64, 0xff9b, 1]
         }
     }
 }
@@ -328,6 +337,8 @@ struct Entry {
     place: Place,
     /// Lookups made so far, and when the next may be made.
     tries: u8,
+    /// The place before the lookup in flight, kept for when it is skipped.
+    before: Option<Place>,
     next: std::time::Instant,
     logged: bool,
 }
@@ -353,9 +364,10 @@ pub fn place(address: &str) -> Option<Place> {
     }
     let tries = known.get(address).map_or(0, |e| e.tries) + 1;
     let logged = known.get(address).is_some_and(|e| e.logged);
+    let before = known.get(address).map(|e| e.place.clone());
     known.insert(
         address.to_owned(),
-        Entry { place: Place::Pending, tries, next: now + RETRY_AFTER, logged },
+        Entry { place: Place::Pending, tries, next: now + RETRY_AFTER, logged, before },
     );
     let key = address.to_owned();
     let spawned = std::thread::Builder::new()
@@ -364,8 +376,11 @@ pub fn place(address: &str) -> Option<Place> {
             let found = look_up(&key);
             let mut known = places().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(found) = found else {
-                // Skipped: looked up afresh if lookups are switched on again.
-                known.remove(&key);
+                // Skipped, nothing sent: it doesn't count as a try. A first
+                // lookup is forgotten; a retry goes back to the place before
+                // it, with the tries so far kept (switching lookups off and on
+                // doesn't restart the count).
+                skipped(&mut known, &key);
                 return;
             };
             if let Some(e) = known.get_mut(&key) {
@@ -385,6 +400,21 @@ pub fn place(address: &str) -> Option<Place> {
         e.place = Place::Blocked;
     }
     Some(Place::Pending)
+}
+
+/// A lookup of `key` that was skipped before anything was sent.
+fn skipped(known: &mut HashMap<String, Entry>, key: &str) {
+    let Some(e) = known.get_mut(key) else { return };
+    match e.before.take() {
+        Some(before) if e.tries > 1 => {
+            e.place = before;
+            e.tries -= 1;
+            e.next = std::time::Instant::now();
+        }
+        _ => {
+            known.remove(key);
+        }
+    }
 }
 
 /// Resolves the address and asks the service where its IP is; `None` when
@@ -757,6 +787,27 @@ mod tests {
             assert!(is_local(ip.parse::<Ipv6Addr>().unwrap().into()), "{ip}");
         }
         assert!(!is_local("::ffff:51.75.1.1".parse::<Ipv6Addr>().unwrap().into()));
+        // NAT64: the IPv4 address inside decides, and the local-use prefix is local.
+        for ip in ["64:ff9b::192.168.1.20", "64:ff9b::10.0.0.5", "64:ff9b::127.0.0.1", "64:ff9b:1::33:4b01"] {
+            assert!(is_local(ip.parse::<Ipv6Addr>().unwrap().into()), "{ip}");
+        }
+        assert!(!is_local("64:ff9b::51.75.1.1".parse::<Ipv6Addr>().unwrap().into()));
+    }
+
+    #[test]
+    fn a_skipped_lookup_keeps_the_tries_so_far() {
+        let now = std::time::Instant::now();
+        let entry = |tries, before| Entry { place: Place::Pending, tries, next: now, logged: true, before };
+        let mut known = HashMap::new();
+        // A retry skipped because lookups were switched off: back to before, the count kept.
+        known.insert("a".to_owned(), entry(3, Some(Place::Blocked)));
+        skipped(&mut known, "a");
+        let a = &known["a"];
+        assert_eq!((a.place.clone(), a.tries), (Place::Blocked, 2));
+        // A first lookup skipped: forgotten, as if never asked.
+        known.insert("b".to_owned(), entry(1, None));
+        skipped(&mut known, "b");
+        assert!(!known.contains_key("b"));
     }
 
     #[test]

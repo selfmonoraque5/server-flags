@@ -69,13 +69,13 @@ A blocked or unresolved lookup is tried again a minute later, three times at mos
 
 ## Install
 
-Made for Horizon **Nightly 2026-11-21 · 8f83e5c**.
+Made for Horizon **Nightly 2026-11-21 · f037744**.
 It patches the game, so it builds only on that exact Horizon build: if the launcher lists it as
 **Left out**, switch your instance to that Nightly, or wait for the version made for yours.
 
 From GitHub:
 
-1. Download `server_flags-2.0.3.hmod` from the [latest release](https://github.com/selfmonoraque5/server-flags/releases/latest).
+1. Download `server_flags-2.0.4.hmod` from the [latest release](https://github.com/selfmonoraque5/server-flags/releases/latest).
 2. Put it in the `horizon-native-mods` folder of your game folder, not in `mods`. On Windows that is
    `%APPDATA%\horizon\horizon-native-mods`.
 3. In the launcher, open the Mods page and click **Build** (the first build downloads the mod SDK and takes a few
