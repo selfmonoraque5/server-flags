@@ -1,6 +1,6 @@
 id = "server_flags"
 name = "Server Flags"
-version = "2.0.4"
+version = "2.0.5"
 description = "A flag beside each server in the Multiplayer list for the country it's hosted in. Looks servers up at api.country.is."
 authors = ["selfmonoraque5"]
 license = "MIT"
@@ -14,7 +14,7 @@ capabilities = ["registries"]
 
 [native]
 game = "26.3"
-horizon = "f037744a79f9982c47876f49c5a3067279f88706"
+horizon = "2b77287de099c9316278ba7ac4d83590fdb7ef30"
 mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
 
 # The mod API doesn't show a mod the server list, so the mod patches the

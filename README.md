@@ -5,6 +5,8 @@
 A small flag beside each server in your Multiplayer list for the country it is hosted in. Hover the flag for the
 country's name. Pick servers close to you for a better ping at a glance.
 
+<p align="center"><img src="screenshots/server-list.jpg" width="70%" alt="A flag beside a server in the Multiplayer list"></p>
+
 Client side only.
 
 ## What it does
@@ -69,7 +71,7 @@ A blocked or unresolved lookup is tried again a minute later, three times at mos
 
 ## Install
 
-Made for Horizon **Nightly 2026-11-21 · f037744**.
+Made for Horizon **Nightly 2026-11-22 · 2b77287**.
 It patches the game, so it builds only on that exact Horizon build: if the launcher lists it as
 **Left out**, switch your instance to that Nightly, or wait for the version made for yours.
 
