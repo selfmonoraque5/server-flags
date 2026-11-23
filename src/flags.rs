@@ -326,6 +326,7 @@ pub fn is_local(ip: IpAddr) -> bool {
                 || (a == 172 && (b & 0xF0) == 16)
                 || (a == 192 && b == 168)
                 || (a == 192 && b == 0 && (c == 0 || c == 2)) // IETF protocol, documentation
+                || (a == 192 && b == 88 && c == 99) // deprecated 6to4 relay anycast
                 || (a == 198 && (b & 0xFE) == 18) // benchmarking
                 || (a == 198 && b == 51 && c == 100) // documentation
                 || (a == 203 && b == 0 && c == 113) // documentation
@@ -341,10 +342,11 @@ pub fn is_local(ip: IpAddr) -> bool {
             // unique local, link-local, multicast, loopback and the local-use
             // NAT64 prefix are all outside it.
             (seg[0] & 0xE000) != 0x2000
+                // IETF protocol assignments (2001::/23): Teredo, benchmarking,
+                // ORCHID, anycast services; none is a game server, so all of it.
+                || (seg[0] == 0x2001 && seg[1] < 0x0200)
                 || (seg[0] == 0x2001 && seg[1] == 0x0db8) // documentation
-                || (seg[0] == 0x2001 && seg[1] == 0x0002 && seg[2] == 0) // benchmarking
-                || (seg[0] == 0x2001 && (seg[1] & 0xFFE0) == 0x0020) // ORCHIDv2
-                || (seg[0] == 0x2001 && (seg[1] & 0xFFF0) == 0x0010) // ORCHID
+                || seg[0] == 0x2002 // 6to4, which can carry a private IPv4 address
                 || (seg[0] & 0xFFF0) == 0x3FF0 // documentation (3fff::/20)
         }
     }
@@ -1015,17 +1017,17 @@ _minecraft._tcp.sagang.fun	service = 0 0 25570 sagang.gamehosting.cl.
         let v6 = |s: &str| IpAddr::from(s.parse::<Ipv6Addr>().unwrap());
         let v4 = |s: &str| IpAddr::from(s.parse::<Ipv4Addr>().unwrap());
         // Site-local, multicast and other special-use IPv6: never sent.
-        for ip in ["fec0::1", "feff::1", "ff02::1", "ff0e::1", "::", "::1", "2001:db8::1", "3fff::1", "2001:2::1", "2001:10::1", "2001:20::1", "100::1"] {
+        for ip in ["fec0::1", "feff::1", "ff02::1", "ff0e::1", "::", "::1", "2001:db8::1", "3fff::1", "2001:2::1", "2001:10::1", "2001:20::1", "100::1", "2001::1", "2001:0:4136:e378::1", "2001:1::1", "2001:3::1", "2001:1ff::1", "2002:c0a8:0101::1", "2002:0a00:0005::1", "2002:0808:0808::1"] {
             assert!(is_local(v6(ip)), "{ip}");
         }
         // Multicast, reserved, broadcast and documentation IPv4, also as IPv6 or NAT64.
-        for ip in ["224.0.0.1", "239.1.2.3", "240.0.0.1", "255.255.255.255", "0.1.2.3", "192.0.2.5", "198.51.100.7", "203.0.113.9", "198.18.0.1", "192.0.0.8"] {
+        for ip in ["224.0.0.1", "239.1.2.3", "240.0.0.1", "255.255.255.255", "0.1.2.3", "192.0.2.5", "198.51.100.7", "203.0.113.9", "198.18.0.1", "192.0.0.8", "192.88.99.1"] {
             assert!(is_local(v4(ip)), "{ip}");
             assert!(is_local(v6(&format!("::ffff:{ip}"))), "::ffff:{ip}");
             assert!(is_local(v6(&format!("64:ff9b::{ip}"))), "64:ff9b::{ip}");
         }
         // Public addresses still are.
-        for ip in ["2a01:4f8::1", "2606:4700::1111", "2001:4860::8888"] {
+        for ip in ["2a01:4f8::1", "2606:4700::1111", "2001:4860::8888", "2001:200::1", "2003::1"] {
             assert!(!is_local(v6(ip)), "{ip}");
         }
         for ip in ["8.8.8.8", "51.75.1.1", "1.1.1.1"] {
@@ -1036,7 +1038,7 @@ _minecraft._tcp.sagang.fun	service = 0 0 25570 sagang.gamehosting.cl.
     #[test]
     fn a_special_use_address_sends_nothing_to_the_service() {
         // `look_up` stops at `is_local` before `ask`: these resolve and end as Local.
-        for address in ["[fec0::1]:25565", "[ff02::1]", "224.0.0.1", "[2001:db8::5]"] {
+        for address in ["[fec0::1]:25565", "[ff02::1]", "224.0.0.1", "[2001:db8::5]", "192.88.99.1", "[2001:0:4136:e378::1]", "[2002:c0a8:101::1]"] {
             let (host, port) = host_port(address).unwrap();
             let ip = (host.as_str(), port).to_socket_addrs().unwrap().next().unwrap().ip();
             assert!(is_local(ip), "{address} would be sent");

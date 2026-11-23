@@ -26,7 +26,7 @@ address's Minecraft SRV record, as the game does when no port is given) and send
 once per server per game session (a lookup that couldn't get through is tried again a minute later, three times at
 most), in the background, and only while **Look up server locations** is on. Nothing
 about you, your account or your other servers is sent, and only public addresses are ever looked up: your own
-network's (including IPv4 written as IPv6, like `::ffff:192.168.1.2`), IPv6 site-local, multicast, documentation
+network's (including IPv4 written as IPv6, like `::ffff:192.168.1.2`, or inside 6to4), IPv6 site-local, multicast, documentation
 and other special-use addresses never are. Turn the setting off and the mod starts no new lookups; one
 that is already on its way when you switch it off may still finish.
 
