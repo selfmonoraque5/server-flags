@@ -71,7 +71,7 @@ A blocked or unresolved lookup is tried again a minute later, three times at mos
 
 ## Install
 
-Made for Horizon **Nightly 2026-11-22 · 2b77287**.
+Made for Horizon **Nightly 2026-11-22 · f1bb66f**.
 It patches the game, so it builds only on that exact Horizon build: if the launcher lists it as
 **Left out**, switch your instance to that Nightly, or wait for the version made for yours.
 
