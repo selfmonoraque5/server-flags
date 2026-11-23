@@ -308,20 +308,27 @@ pub fn run(mut cmd: std::process::Command, limit: std::time::Duration) -> Option
     reader.join().ok().map(|out| String::from_utf8_lossy(&out).into_owned())
 }
 
-/// An address that never leaves the computer's network: loopback, private,
-/// link-local and the like are not looked up. An IPv4 address written as IPv6
-/// (`::ffff:192.168.1.2`) or behind NAT64 (`64:ff9b::192.168.1.2`) counts as
-/// the IPv4 address it is.
+/// An address that is never looked up: anything but a globally reachable
+/// unicast address (loopback, private, link-local, site-local, multicast,
+/// documentation and other special-use ranges). An IPv4 address written as
+/// IPv6 (`::ffff:192.168.1.2`) or behind NAT64 (`64:ff9b::192.168.1.2`) counts
+/// as the IPv4 address it is.
 pub fn is_local(ip: IpAddr) -> bool {
     match ip.to_canonical() {
         IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                // 100.64.0.0/10, carrier-grade NAT and Tailscale.
-                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
+            let [a, b, c, _] = v4.octets();
+            a == 0 // "this network"
+                || a == 10
+                || a == 127
+                || a >= 224 // multicast, reserved and broadcast
+                || (a == 100 && (b & 0xC0) == 64) // carrier-grade NAT and Tailscale
+                || (a == 169 && b == 254)
+                || (a == 172 && (b & 0xF0) == 16)
+                || (a == 192 && b == 168)
+                || (a == 192 && b == 0 && (c == 0 || c == 2)) // IETF protocol, documentation
+                || (a == 198 && (b & 0xFE) == 18) // benchmarking
+                || (a == 198 && b == 51 && c == 100) // documentation
+                || (a == 203 && b == 0 && c == 113) // documentation
         }
         IpAddr::V6(v6) => {
             let seg = v6.segments();
@@ -330,12 +337,15 @@ pub fn is_local(ip: IpAddr) -> bool {
                 let [.., a, b, c, d] = v6.octets();
                 return is_local(IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d)));
             }
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || (seg[0] & 0xFE00) == 0xFC00
-                || (seg[0] & 0xFFC0) == 0xFE80
-                // 64:ff9b:1::/48, NAT64 for a local network only.
-                || seg[..3] == [0x64, 0xff9b, 1]
+            // Only global unicast (2000::/3) is public: site-local (fec0::/10),
+            // unique local, link-local, multicast, loopback and the local-use
+            // NAT64 prefix are all outside it.
+            (seg[0] & 0xE000) != 0x2000
+                || (seg[0] == 0x2001 && seg[1] == 0x0db8) // documentation
+                || (seg[0] == 0x2001 && seg[1] == 0x0002 && seg[2] == 0) // benchmarking
+                || (seg[0] == 0x2001 && (seg[1] & 0xFFE0) == 0x0020) // ORCHIDv2
+                || (seg[0] == 0x2001 && (seg[1] & 0xFFF0) == 0x0010) // ORCHID
+                || (seg[0] & 0xFFF0) == 0x3FF0 // documentation (3fff::/20)
         }
     }
 }
@@ -998,6 +1008,39 @@ _minecraft._tcp.sagang.fun	service = 0 0 25570 sagang.gamehosting.cl.
             assert!(is_local(ip.parse::<Ipv6Addr>().unwrap().into()), "{ip}");
         }
         assert!(!is_local("64:ff9b::51.75.1.1".parse::<Ipv6Addr>().unwrap().into()));
+    }
+
+    #[test]
+    fn only_globally_reachable_unicast_is_looked_up() {
+        let v6 = |s: &str| IpAddr::from(s.parse::<Ipv6Addr>().unwrap());
+        let v4 = |s: &str| IpAddr::from(s.parse::<Ipv4Addr>().unwrap());
+        // Site-local, multicast and other special-use IPv6: never sent.
+        for ip in ["fec0::1", "feff::1", "ff02::1", "ff0e::1", "::", "::1", "2001:db8::1", "3fff::1", "2001:2::1", "2001:10::1", "2001:20::1", "100::1"] {
+            assert!(is_local(v6(ip)), "{ip}");
+        }
+        // Multicast, reserved, broadcast and documentation IPv4, also as IPv6 or NAT64.
+        for ip in ["224.0.0.1", "239.1.2.3", "240.0.0.1", "255.255.255.255", "0.1.2.3", "192.0.2.5", "198.51.100.7", "203.0.113.9", "198.18.0.1", "192.0.0.8"] {
+            assert!(is_local(v4(ip)), "{ip}");
+            assert!(is_local(v6(&format!("::ffff:{ip}"))), "::ffff:{ip}");
+            assert!(is_local(v6(&format!("64:ff9b::{ip}"))), "64:ff9b::{ip}");
+        }
+        // Public addresses still are.
+        for ip in ["2a01:4f8::1", "2606:4700::1111", "2001:4860::8888"] {
+            assert!(!is_local(v6(ip)), "{ip}");
+        }
+        for ip in ["8.8.8.8", "51.75.1.1", "1.1.1.1"] {
+            assert!(!is_local(v4(ip)), "{ip}");
+        }
+    }
+
+    #[test]
+    fn a_special_use_address_sends_nothing_to_the_service() {
+        // `look_up` stops at `is_local` before `ask`: these resolve and end as Local.
+        for address in ["[fec0::1]:25565", "[ff02::1]", "224.0.0.1", "[2001:db8::5]"] {
+            let (host, port) = host_port(address).unwrap();
+            let ip = (host.as_str(), port).to_socket_addrs().unwrap().next().unwrap().ip();
+            assert!(is_local(ip), "{address} would be sent");
+        }
     }
 
     #[test]
