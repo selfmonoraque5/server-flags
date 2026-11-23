@@ -33,6 +33,11 @@ The request is made by your system's `curl` program, which Windows 10 and 11, ma
 It runs with `--disable`, so your own curl settings (a `.curlrc`) are not used: no extra headers are sent and no file
 is written.
 
+`curl` and `nslookup` are only run from the system's own folders (`Windows\System32`, or `/usr/bin`, `/bin`,
+`/usr/sbin` and NixOS's `/run/current-system/sw/bin`), never from PATH or the game's folder. Each is ended if it
+takes longer than a few seconds, at most four lookups run at once, and the setting is checked again before each
+step that sends anything.
+
 ## Settings
 
 Options > Mods > Server Flags > **Config**. Each button steps through its values.

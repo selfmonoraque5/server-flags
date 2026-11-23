@@ -18,7 +18,7 @@
 // line in the game log saying why.
 use std::collections::HashMap;
 use std::net::{IpAddr, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// The mod's id (its settings folder) and name; the version is in horizon-mod.toml.
@@ -241,19 +241,71 @@ pub fn srv_answer(output: &str) -> Option<(String, u16)> {
 /// servers' names have no address of their own), else the host and port as written.
 fn target(address: &str) -> Option<(String, u16)> {
     let srv = srv_name(address).and_then(|name| {
-        let mut ns = std::process::Command::new("nslookup");
+        let mut ns = std::process::Command::new(system_tool("nslookup")?);
         // The name's own text: letters, digits, dots and dashes, never an option or a shell.
         ns.args(["-type=SRV", "-timeout=3"]).arg(name);
-        ns.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-        #[cfg(windows)]
-        {
-            // CREATE_NO_WINDOW: no console window flashes up beside the game.
-            use std::os::windows::process::CommandExt;
-            ns.creation_flags(0x0800_0000);
-        }
-        ns.output().ok().and_then(|out| srv_answer(&String::from_utf8_lossy(&out.stdout)))
+        run(ns, NSLOOKUP_LIMIT).and_then(|out| srv_answer(&out))
     });
     srv.or_else(|| host_port(address))
+}
+
+/// The longest a program the mod runs may take before it is ended: nslookup (asked to give up
+/// after 3 s, but it may try again) and curl (`-m 6`).
+const NSLOOKUP_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+const CURL_LIMIT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// The system's own copy of `name` (nslookup, curl), from the system's folders only: never one
+/// found through PATH or the game's folder, which another program could have put there.
+pub fn system_tool(name: &str) -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    let dirs: Vec<std::path::PathBuf> = {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        vec![std::path::Path::new(&root).join("System32")]
+    };
+    #[cfg(not(windows))]
+    let dirs: Vec<std::path::PathBuf> =
+        ["/usr/bin", "/bin", "/usr/sbin", "/run/current-system/sw/bin"].iter().map(Into::into).collect();
+    let file = if cfg!(windows) { format!("{name}.exe") } else { name.to_owned() };
+    dirs.into_iter().map(|d| d.join(&file)).find(|p| p.is_file())
+}
+
+/// Runs `cmd` with no input and no window, and gives its output once it ends: None if it can't
+/// start, or if it is still running after `limit` (it is then ended).
+pub fn run(mut cmd: std::process::Command, limit: std::time::Duration) -> Option<String> {
+    use std::io::Read;
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        // CREATE_NO_WINDOW: no console window flashes up beside the game.
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let mut child = cmd.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    // Read as it comes, so a full pipe never holds the program up.
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let _ = stdout.read_to_end(&mut out);
+        out
+    });
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return None;
+            }
+        }
+    }
+    reader.join().ok().map(|out| String::from_utf8_lossy(&out).into_owned())
 }
 
 /// An address that never leaves the computer's network: loopback, private,
@@ -310,22 +362,13 @@ pub fn curl_answer(output: &str) -> Answer {
 /// Asks the service about `ip` with the system's curl. No curl, a timeout or
 /// no connection are all `Unreachable`.
 fn ask(ip: IpAddr) -> Answer {
-    let mut curl = std::process::Command::new("curl");
+    let Some(path) = system_tool("curl") else { return Answer::Unreachable };
+    let mut curl = std::process::Command::new(path);
     // --disable, which must come first: the user's own curl config (.curlrc) is
     // not read, so none of its headers go along and it can't make curl write a file.
     // The IP's own text: digits, dots and colons, never a shell.
     curl.args(["--disable", "-s", "-m", "6", "-w", "\n%{http_code}"]).arg(format!("{SERVICE}{ip}"));
-    curl.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        // CREATE_NO_WINDOW: no console window flashes up beside the game.
-        use std::os::windows::process::CommandExt;
-        curl.creation_flags(0x0800_0000);
-    }
-    match curl.output() {
-        Ok(out) => curl_answer(&String::from_utf8_lossy(&out.stdout)),
-        Err(_) => Answer::Unreachable,
-    }
+    run(curl, CURL_LIMIT).map_or(Answer::Unreachable, |out| curl_answer(&out))
 }
 
 // ----------------------------------------------------------------- lookups
@@ -415,6 +458,10 @@ pub fn place(address: &str) -> Option<Place> {
     if !current().on(o::LOOKUP) {
         return known.get(address).map(|e| e.place.clone());
     }
+    // At most `MAX_LOOKUPS` at once: the rest start on a later frame.
+    let Some(slot) = Slot::take() else {
+        return Some(known.get(address).map_or(Place::Pending, |e| e.place.clone()));
+    };
     let tries = known.get(address).map_or(0, |e| e.tries) + 1;
     let logged = known.get(address).is_some_and(|e| e.logged);
     let before = known.get(address).map(|e| e.place.clone());
@@ -426,6 +473,7 @@ pub fn place(address: &str) -> Option<Place> {
     let spawned = std::thread::Builder::new()
         .name("server-flags".into())
         .spawn(move || {
+            let _slot = slot;
             let found = look_up(&key);
             let mut known = places().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(found) = found else {
@@ -455,6 +503,28 @@ pub fn place(address: &str) -> Option<Place> {
     Some(Place::Pending)
 }
 
+/// How many lookups may run at once (a long server list starts them a few at a time).
+pub const MAX_LOOKUPS: usize = 4;
+static RUNNING: AtomicUsize = AtomicUsize::new(0);
+
+/// One of the `MAX_LOOKUPS` places for a running lookup, given back when dropped.
+pub struct Slot(());
+
+impl Slot {
+    pub fn take() -> Option<Slot> {
+        RUNNING
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < MAX_LOOKUPS).then_some(n + 1))
+            .ok()
+            .map(|_| Slot(()))
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        RUNNING.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// A lookup of `key` that was skipped before anything was sent.
 fn skipped(known: &mut HashMap<String, Entry>, key: &str) {
     let Some(e) = known.get_mut(key) else { return };
@@ -473,9 +543,17 @@ fn skipped(known: &mut HashMap<String, Entry>, key: &str) {
 /// Resolves the address and asks the service where its IP is; `None` when
 /// lookups were switched off while it resolved, and nothing was sent.
 fn look_up(address: &str) -> Option<Place> {
+    // Lookups may have been switched off since this one started: checked before each step that
+    // sends anything (the SRV query, resolving the address, asking the service).
+    if !current().on(o::LOOKUP) {
+        return None;
+    }
     let Some((host, port)) = target(address) else {
         return Some(Place::Unresolved);
     };
+    if !current().on(o::LOOKUP) {
+        return None;
+    }
     let Ok(mut addrs) = (host.as_str(), port).to_socket_addrs() else {
         return Some(Place::Unresolved);
     };
@@ -815,6 +893,43 @@ pub fn unknown(place: &Place) -> bool {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn at_most_max_lookups_at_once() {
+        let slots: Vec<Slot> = std::iter::from_fn(Slot::take).take(MAX_LOOKUPS + 2).collect();
+        assert_eq!(slots.len(), MAX_LOOKUPS);
+        assert!(Slot::take().is_none());
+        drop(slots);
+        assert!(Slot::take().is_some(), "given back");
+    }
+
+    #[test]
+    fn system_tools_come_from_the_system_folders() {
+        let nslookup = system_tool("nslookup").expect("nslookup on this system");
+        assert!(nslookup.is_absolute(), "{nslookup:?}");
+        #[cfg(windows)]
+        assert!(nslookup.to_string_lossy().to_ascii_lowercase().ends_with("system32\\nslookup.exe"), "{nslookup:?}");
+        assert!(system_tool("no-such-tool-xyz").is_none());
+    }
+
+    #[test]
+    fn a_program_that_runs_too_long_is_ended() {
+        #[cfg(windows)]
+        let cmd = {
+            let mut c = std::process::Command::new(system_tool("ping").unwrap());
+            c.args(["-n", "30", "127.0.0.1"]);
+            c
+        };
+        #[cfg(not(windows))]
+        let cmd = {
+            let mut c = std::process::Command::new(system_tool("sleep").unwrap());
+            c.arg("30");
+            c
+        };
+        let start = std::time::Instant::now();
+        assert_eq!(run(cmd, std::time::Duration::from_millis(300)), None);
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
 
     #[test]
     fn srv_only_for_a_host_name_without_a_port() {
