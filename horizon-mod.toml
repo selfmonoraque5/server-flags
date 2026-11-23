@@ -1,6 +1,6 @@
 id = "server_flags"
 name = "Server Flags"
-version = "2.0.6"
+version = "2.0.7"
 description = "A flag beside each server in the Multiplayer list for the country it's hosted in. Looks servers up at api.country.is."
 authors = ["selfmonoraque5"]
 license = "MIT"

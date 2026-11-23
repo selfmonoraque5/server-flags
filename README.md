@@ -20,7 +20,8 @@ Client side only.
 
 ## Privacy: what is sent where
 
-To know where a server is, the mod resolves the server's address to an IP address and sends **only that IP** to
+To know where a server is, the mod resolves the server's address to an IP address (first asking your DNS for the
+address's Minecraft SRV record, as the game does when no port is given) and sends **only that IP** to
 [api.country.is](https://country.is) (open source, no account or key), which answers with a country code. It does so
 once per server per game session (a lookup that couldn't get through is tried again a minute later, three times at
 most), in the background, and only while **Look up server locations** is on. Nothing
@@ -65,8 +66,9 @@ A blocked or unresolved lookup is tried again a minute later, three times at mos
 
 ## Good to know
 
-- The address is resolved as written in your server list. A server that uses a DNS SRV record (a bare domain whose
-  game server is elsewhere) shows the country of the domain's own address, which is usually the same.
+- A server that uses a DNS SRV record (a bare domain whose game server is elsewhere) shows where its game server is,
+  as the game connects there. The SRV record is read with your system's `nslookup`; without it, the address is
+  resolved as written.
 - A server behind a proxy or DDoS protection (TCPShield and the like) shows where the proxy is.
 
 ## Install
@@ -77,7 +79,7 @@ It patches the game, so it builds only on that exact Horizon build: if the launc
 
 From GitHub:
 
-1. Download `server_flags-2.0.4.hmod` from the [latest release](https://github.com/selfmonoraque5/server-flags/releases/latest).
+1. Download the `server_flags-….hmod` file from the [latest release](https://github.com/selfmonoraque5/server-flags/releases/latest).
 2. Put it in the `horizon-native-mods` folder of your game folder, not in `mods`. On Windows that is
    `%APPDATA%\horizon\horizon-native-mods`.
 3. In the launcher, open the Mods page and click **Build** (the first build downloads the mod SDK and takes a few

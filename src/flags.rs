@@ -203,6 +203,59 @@ pub fn host_port(address: &str) -> Option<(String, u16)> {
     }
 }
 
+/// The SRV name the game looks up for `address` first (`_minecraft._tcp.<host>`): only for a
+/// host name written without a port, as the game does. None for an IP address, a port, or a
+/// name nslookup could take for an option.
+pub fn srv_name(address: &str) -> Option<String> {
+    let host = address.trim().trim_end_matches('.');
+    let name_like = !host.is_empty()
+        && !host.starts_with(['-', '.'])
+        && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
+    (name_like && host.parse::<IpAddr>().is_err()).then(|| format!("_minecraft._tcp.{host}"))
+}
+
+/// The first target in nslookup's answer to an SRV query, in Windows' form (`port = 25565`,
+/// `svr hostname = host`) or BIND's (`service = 0 5 25565 host.`).
+pub fn srv_answer(output: &str) -> Option<(String, u16)> {
+    let mut port = None;
+    for line in output.lines().map(str::trim) {
+        if let Some((_, rest)) = line.split_once("service = ") {
+            let f: Vec<&str> = rest.split_whitespace().collect();
+            if let [_, _, p, target, ..] = f[..]
+                && let Ok(p) = p.parse()
+            {
+                return Some((target.trim_end_matches('.').to_owned(), p));
+            }
+        } else if let Some(v) = line.strip_prefix("port").and_then(|r| r.trim_start().strip_prefix('=')) {
+            port = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("svr hostname").and_then(|r| r.trim_start().strip_prefix('='))
+            && let Some(p) = port
+        {
+            return Some((v.trim().trim_end_matches('.').to_owned(), p));
+        }
+    }
+    None
+}
+
+/// Where the game would connect for `address`: its SRV record's target when it has one (many
+/// servers' names have no address of their own), else the host and port as written.
+fn target(address: &str) -> Option<(String, u16)> {
+    let srv = srv_name(address).and_then(|name| {
+        let mut ns = std::process::Command::new("nslookup");
+        // The name's own text: letters, digits, dots and dashes, never an option or a shell.
+        ns.args(["-type=SRV", "-timeout=3"]).arg(name);
+        ns.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            // CREATE_NO_WINDOW: no console window flashes up beside the game.
+            use std::os::windows::process::CommandExt;
+            ns.creation_flags(0x0800_0000);
+        }
+        ns.output().ok().and_then(|out| srv_answer(&String::from_utf8_lossy(&out.stdout)))
+    });
+    srv.or_else(|| host_port(address))
+}
+
 /// An address that never leaves the computer's network: loopback, private,
 /// link-local and the like are not looked up. An IPv4 address written as IPv6
 /// (`::ffff:192.168.1.2`) or behind NAT64 (`64:ff9b::192.168.1.2`) counts as
@@ -420,7 +473,7 @@ fn skipped(known: &mut HashMap<String, Entry>, key: &str) {
 /// Resolves the address and asks the service where its IP is; `None` when
 /// lookups were switched off while it resolved, and nothing was sent.
 fn look_up(address: &str) -> Option<Place> {
-    let Some((host, port)) = host_port(address) else {
+    let Some((host, port)) = target(address) else {
         return Some(Place::Unresolved);
     };
     let Ok(mut addrs) = (host.as_str(), port).to_socket_addrs() else {
@@ -762,6 +815,44 @@ pub fn unknown(place: &Place) -> bool {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn srv_only_for_a_host_name_without_a_port() {
+        assert_eq!(srv_name("sagang.fun").as_deref(), Some("_minecraft._tcp.sagang.fun"));
+        assert_eq!(srv_name(" Play.Example.net. ").as_deref(), Some("_minecraft._tcp.Play.Example.net"));
+        assert_eq!(srv_name("sagang.fun:25565"), None);
+        assert_eq!(srv_name("1.2.3.4"), None);
+        assert_eq!(srv_name("[::1]"), None);
+        assert_eq!(srv_name("-type=A"), None);
+        assert_eq!(srv_name(""), None);
+    }
+
+    #[test]
+    fn reads_nslookup_srv_answers() {
+        // Windows.
+        let win = "Server:  router
+Address:  192.168.1.1
+
+Non-authoritative answer:
+_minecraft._tcp.sagang.fun	SRV service location:
+	  priority       = 0
+	  weight         = 0
+	  port           = 25565
+	  svr hostname   = sagang.gamehosting.cl
+";
+        assert_eq!(srv_answer(win), Some(("sagang.gamehosting.cl".into(), 25565)));
+        // BIND (Linux, macOS).
+        let bind = "Server:		127.0.0.53
+Address:	127.0.0.53#53
+
+Non-authoritative answer:
+_minecraft._tcp.sagang.fun	service = 0 0 25570 sagang.gamehosting.cl.
+";
+        assert_eq!(srv_answer(bind), Some(("sagang.gamehosting.cl".into(), 25570)));
+        // No record.
+        assert_eq!(srv_answer("*** router can't find _minecraft._tcp.example.com: Non-existent domain
+"), None);
+    }
 
     #[test]
     fn addresses_split_into_host_and_port() {
